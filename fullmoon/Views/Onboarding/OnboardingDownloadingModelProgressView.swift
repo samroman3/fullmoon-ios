@@ -14,6 +14,7 @@ struct OnboardingDownloadingModelProgressView: View {
     @Binding var selectedModel: ModelConfiguration
     @Environment(LLMEvaluator.self) var llm
     @State var didSwitchModel = false
+    @State private var resetAnimation = false
     
     var installed: Bool {
         llm.progress == 1 && didSwitchModel
@@ -24,7 +25,7 @@ struct OnboardingDownloadingModelProgressView: View {
             Spacer()
             
             VStack(spacing: 16) {
-                MoonAnimationView(isDone: installed)
+                MoonAnimationView(isDone: installed, resetAnimation: resetAnimation)
                 
                 VStack(spacing: 4) {
                     Text(installed ? "installed" : "installing")
@@ -58,19 +59,60 @@ struct OnboardingDownloadingModelProgressView: View {
                 .buttonBorderShape(.capsule)
                 .padding(.horizontal)
             } else {
-                Text("keep this screen open and wait for the installation to complete.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
+                if llm.progress >= 0.80 && !llm.isModelFullyLoaded {
+                    Text("please keep app open to complete download")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                } else {
+                    Text("you can leave the app while downloading")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
             }
         }
         .padding()
-        .navigationTitle("sit back and relax")
+        .navigationTitle("downloading model")
         .toolbar(installed ? .hidden : .visible)
         .navigationBarBackButtonHidden()
         .task {
+            // Prevent device from sleeping during download
+            UIApplication.shared.isIdleTimerDisabled = true
+            
+            // Request notification permissions
+            try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+            
+            // Wait until the app is in the foreground
+            while UIApplication.shared.applicationState != .active {
+                await withCheckedContinuation { continuation in
+                    var token: NSObjectProtocol?
+                    token = NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
+                        if let token = token {
+                            NotificationCenter.default.removeObserver(token)
+                        }
+                        continuation.resume()
+                    }
+                }
+                // Brief delay after activation
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            
+            // Check for an interrupted download and resume it automatically
+            if let (modelName, progress) = appManager.loadInterruptedDownload() {
+                selectedModel = ModelConfiguration.getModelByName(modelName) ?? selectedModel
+                llm.progress = progress
+                print("OnboardingDownloadingModelProgressView: Resuming interrupted download for model: \(modelName) at progress \(progress)")
+            }
+            
+            // Now safe to load the model
             await loadLLM()
+        }
+        .onDisappear {
+            UIApplication.shared.isIdleTimerDisabled = false
+            appManager.clearInterruptedDownload()
         }
         #if os(iOS)
         .sensoryFeedback(.success, trigger: installed)
@@ -79,6 +121,9 @@ struct OnboardingDownloadingModelProgressView: View {
             addInstalledModel()
         }
         .interactiveDismissDisabled(!installed)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            resetAnimation.toggle()
+        }
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {

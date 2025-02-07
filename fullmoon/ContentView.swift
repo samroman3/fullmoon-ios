@@ -7,6 +7,7 @@
 
 import SwiftData
 import SwiftUI
+import MLXLMCommon
 
 struct ContentView: View {
     @EnvironmentObject var appManager: AppManager
@@ -38,8 +39,12 @@ struct ContentView: View {
         .environmentObject(appManager)
         .environment(llm)
         .task {
-            if appManager.installedModels.count == 0 {
-                showOnboarding.toggle()
+            // First, if an interrupted download exists, navigate directly to the download screen.
+            if appManager.loadInterruptedDownload() != nil {
+                showOnboarding = true
+            } else if appManager.installedModels.count == 0 {
+                // No models installed => show onboarding.
+                showOnboarding = true
             } else {
                 isPromptFocused = true
                 // load the model
@@ -78,10 +83,19 @@ struct ContentView: View {
                 }
         }
         .sheet(isPresented: $showOnboarding, onDismiss: dismissOnboarding) {
-            OnboardingView(showOnboarding: $showOnboarding)
-                .environment(llm)
-                .interactiveDismissDisabled(appManager.installedModels.count == 0)
-            
+            // If an interrupted download exists, directly present the download progress view.
+            if let (model, _) = appManager.loadInterruptedDownload() {
+                OnboardingDownloadingModelProgressView(
+                    showOnboarding: $showOnboarding,
+                    selectedModel: .constant(MLXLMCommon.ModelConfiguration.getModelByName(model) ?? ModelConfiguration.defaultModel)
+                )
+                .environmentObject(appManager)
+                .environment(LLMEvaluator())
+            } else {
+                OnboardingView(showOnboarding: $showOnboarding)
+                    .environment(llm)
+                    .interactiveDismissDisabled(appManager.installedModels.count == 0)
+            }
         }
         #if !os(visionOS)
         .tint(appManager.appTintColor.getColor())
@@ -91,6 +105,9 @@ struct ContentView: View {
         .fontWidth(appManager.appFontWidth.getFontWidth())
         .onAppear {
             appManager.incrementNumberOfVisits()
+            Task {
+                await llm.resetLiveActivity()
+            }
         }
     }
     
